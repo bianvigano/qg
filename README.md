@@ -18,7 +18,7 @@ qg --no-cache   # paksa refresh dari GitHub
 | `/` | cari nama & deskripsi |
 | `backspace` | hapus pencarian |
 | `f` | filter tipe: all → fork → source → private → public |
-| `m` | menu filter: tipe / bahasa (custom bebas, `!` exclude) / urutan / cari |
+| `m` | menu filter (↑↓+enter / angka): tipe / bahasa (daftar dari repo + custom, `!` exclude) / urutan / cari |
 | `L` | cycle filter bahasa |
 | `!` | exclude bahasa yang sedang difilter |
 | `s` | star/unstar repo di kursor |

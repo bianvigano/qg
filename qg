@@ -159,31 +159,47 @@ def preview(r):
     console.print("[dim]enter kembali[/]")
     read_key()
 
-def menu():
-    from rich.markup import escape
+def pick(title, options, cur=0):
     while True:
         console.clear()
-        body = (f"[bold cyan]1[/] tipe    : {S.ftype}\n"
-                f"[bold cyan]2[/] bahasa : {escape(('!' if not S.flang_mode else '') + (S.flang or '(off)'))}\n"
-                f"[bold cyan]3[/] urutan : {S.sort}\n"
-                f"[bold cyan]4[/] cari   : {escape(S.query or '(kosong)')}\n\n"
-                "[bold cyan]0[/] selesai")
-        console.print(Panel(body, title="filter", border_style="cyan"))
-        c = prompt("pilih (angka):")
-        if c in ("", "0", "q"): break
-        if c == "1":
-            t = prompt("tipe " + "/".join(TYPES) + ":")
-            if t in TYPES: S.ftype = t
-        elif c == "2":
-            l = prompt("bahasa (kosong=off, !x=exclude, custom bebas):")
-            S.flang_mode = not l.startswith("!")
-            S.flang = l.lstrip("!")
-        elif c == "3":
-            s = prompt("urutan " + "/".join(SORTS) + ":")
-            if s in SORTS: S.sort = s
-        elif c == "4":
+        lines = "\n".join(f"[bold cyan]>[/] {o}" if i == cur else f"  {o}"
+                          for i, o in enumerate(options))
+        console.print(Panel(lines, title=title, border_style="cyan"))
+        k = read_key()
+        if k == 'up': cur = max(0, cur-1)
+        elif k == 'down': cur = min(len(options)-1, cur+1)
+        elif k == 'enter': return cur
+        elif k.isdigit() and 1 <= int(k) <= len(options): return int(k)-1
+        elif k in ('q', 'esc'): return None
+
+def menu():
+    sel = 0
+    while True:
+        cur_lang = ('!' if not S.flang_mode else '') + (S.flang or 'off')
+        opts = [f"tipe    : {S.ftype}", f"bahasa  : {cur_lang}",
+                f"urutan  : {S.sort}", f"cari    : {S.query or '(kosong)'}", "selesai"]
+        c = pick("filter — ↑↓ pilih, enter, angka, q batal", opts, sel)
+        if c is None or c == 4: break
+        sel = c
+        if c == 0:
+            i = pick("tipe", TYPES, TYPES.index(S.ftype))
+            if i is not None: S.ftype = TYPES[i]
+        elif c == 1:
+            langs = [l for l, _ in Counter((r.get("language") or "?") for r in S.repos).most_common()]
+            lo = ["(off)"] + langs + ["custom... (ketik bebas, !x = exclude)"]
+            cur_l = 0 if not S.flang else (lo.index(S.flang) if S.flang in lo else len(lo)-1)
+            i = pick(f"bahasa — mode: {'exclude' if not S.flang_mode else 'include'}", lo, cur_l)
+            if i is not None:
+                if i == 0: S.flang = ""; S.flang_mode = True
+                elif i == len(lo)-1:
+                    l = prompt("bahasa custom (kosong=off, !x=exclude):")
+                    S.flang_mode = not l.startswith("!"); S.flang = l.lstrip("!")
+                else: S.flang = lo[i]; S.flang_mode = True
+        elif c == 2:
+            i = pick("urutan", SORTS, SORTS.index(S.sort))
+            if i is not None: S.sort = SORTS[i]
+        elif c == 3:
             S.query = prompt("cari (kosong=hapus):")
-        else: continue
         S.page = S.cursor = 0
 
 def main():
