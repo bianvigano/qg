@@ -16,6 +16,7 @@ console = Console()
 ROWS = 25
 CACHE = os.path.expanduser("~/.cache/qg/repos.json")
 TYPES = ["all", "fork", "source", "private", "public"]
+SORTS = ["pushed", "name", "stars"]
 
 def gh(*args, timeout=90):
     r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout)
@@ -42,7 +43,7 @@ def load_repos(force=False):
 
 class S:
     me=""; repos=[]; cursor=0; page=0; query=""
-    ftype="all"; flang=""; flang_mode=True
+    ftype="all"; flang=""; flang_mode=True; sort="pushed"
     selected=set(); err=""; starred={}
 
 def filtered():
@@ -58,7 +59,9 @@ def filtered():
             has = (r.get("language") or "?").lower() == S.flang.lower()
             if has != S.flang_mode: continue
         out.append(r)
-    return out
+    if S.sort == "name": out.sort(key=lambda r: r["name"].lower())
+    elif S.sort == "stars": out.sort(key=lambda r: -r.get("stargazers_count", 0))
+    return out  # ponytail: 'pushed' = urutan API (sort=pushed desc); upgrade: sort archived/updated
 
 def page_items():
     return filtered()[S.page*ROWS:(S.page+1)*ROWS]
@@ -103,6 +106,7 @@ def status():
     if S.ftype != "all": line += f" | tipe:{S.ftype}"
     if S.flang: line += f" | lang:{'' if S.flang_mode else '!'}{S.flang}"
     if S.selected: line += f" | terpilih:{len(S.selected)}"
+    if S.sort != "pushed": line += f" | sort:{S.sort}"
     st = sum(r.get("stargazers_count", 0) for r in S.repos)
     iss = sum(r.get("open_issues_count", 0) for r in S.repos)
     line += f" | stars {st} | issues {iss}"
@@ -155,6 +159,33 @@ def preview(r):
     console.print("[dim]enter kembali[/]")
     read_key()
 
+def menu():
+    from rich.markup import escape
+    while True:
+        console.clear()
+        body = (f"[bold cyan]1[/] tipe    : {S.ftype}\n"
+                f"[bold cyan]2[/] bahasa : {escape(('!' if not S.flang_mode else '') + (S.flang or '(off)'))}\n"
+                f"[bold cyan]3[/] urutan : {S.sort}\n"
+                f"[bold cyan]4[/] cari   : {escape(S.query or '(kosong)')}\n\n"
+                "[bold cyan]0[/] selesai")
+        console.print(Panel(body, title="filter", border_style="cyan"))
+        c = prompt("pilih (angka):")
+        if c in ("", "0", "q"): break
+        if c == "1":
+            t = prompt("tipe " + "/".join(TYPES) + ":")
+            if t in TYPES: S.ftype = t
+        elif c == "2":
+            l = prompt("bahasa (kosong=off, !x=exclude, custom bebas):")
+            S.flang_mode = not l.startswith("!")
+            S.flang = l.lstrip("!")
+        elif c == "3":
+            s = prompt("urutan " + "/".join(SORTS) + ":")
+            if s in SORTS: S.sort = s
+        elif c == "4":
+            S.query = prompt("cari (kosong=hapus):")
+        else: continue
+        S.page = S.cursor = 0
+
 def main():
     S.me = json.loads(gh("api", "/user"))["login"]
     S.repos = load_repos(force="--no-cache" in sys.argv)
@@ -164,7 +195,7 @@ def main():
         console.print(Panel(body, title=f"qg | {S.me} | R=refresh", border_style="cyan"))
         console.print(f"[dim]{status()}[/]")
         console.print("[dim]↑↓ nav  ←→ hal  enter lihat  / cari  f tipe  L bahasa  s star  TAB pilih  S star-sel[/]")
-        console.print("[dim]c clone  o buka  R refresh  q keluar[/]")
+        console.print("[dim]c clone  C clone-sel  n baru  m menu  o buka  O urut  R refresh  q keluar[/]")
         if S.err: console.print(f"[red]ERR: {S.err}[/]"); S.err = ""
         key = read_key()
         if key in ('q','esc','\x03'): break
@@ -191,9 +222,23 @@ def main():
             name = items[S.cursor]["name"]
             try: subprocess.run(["gh","repo","clone",f"{S.me}/{name}"], check=False)
             except Exception as e: S.err = str(e)
+        elif key == 'C' and S.selected:
+            for n in sorted(S.selected):
+                subprocess.run(["gh","repo","clone",f"{S.me}/{n}"], check=False)
+            S.selected.clear()
         elif key == 'o' and items:
             subprocess.run(["xdg-open", f"https://github.com/{S.me}/{items[S.cursor]['name']}"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif key == 'm': menu()
+        elif key == 'O':
+            S.sort = SORTS[(SORTS.index(S.sort)+1) % len(SORTS)]
+        elif key == 'n':
+            name = prompt("nama repo baru (private):")
+            if name:
+                try:
+                    gh("repo", "create", name, "--private")
+                    S.repos = load_repos(force=True); S.page = S.cursor = 0
+                except Exception as e: S.err = str(e)
         elif key == 'R':
             try: S.repos = load_repos(force=True)
             except Exception as e: S.err = str(e)
