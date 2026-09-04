@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+# qg - GitHub dashboard TUI: semua repo kamu, lebih overkill dari `gh repo list`.
+# Deps: gh (sudah auth), python3 + rich. Install: ln -sf ~/qg/qg ~/bin/qg
+import os, sys, json, time, datetime, subprocess
+from collections import Counter
+
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.text import Text
+except ImportError:
+    print("butuh: pip install rich"); sys.exit(1)
+
+console = Console()
+ROWS = 25
+CACHE = os.path.expanduser("~/.cache/qg/repos.json")
+TYPES = ["all", "fork", "source", "private", "public"]
+
+def gh(*args, timeout=90):
+    r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "").strip()[:200] or "gh gagal")
+    return r.stdout
+
+def fetch_repos():
+    repos, page = [], 1
+    while page <= 20:
+        batch = json.loads(gh("api", f"/user/repos?per_page=100&page={page}&sort=pushed&affiliation=owner"))
+        repos.extend(batch)
+        if len(batch) < 100: break
+        page += 1
+    return repos
+
+def load_repos(force=False):
+    if not force and os.path.exists(CACHE) and time.time() - os.path.getmtime(CACHE) < 3600:
+        with open(CACHE) as f: return json.load(f)
+    repos = fetch_repos()
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    with open(CACHE, "w") as f: json.dump(repos, f)
+    return repos  # ponytail: cache 1 jam; upgrade: ETag / refresh di background
+
+class S:
+    me=""; repos=[]; cursor=0; page=0; query=""
+    ftype="all"; flang=""; flang_mode=True
+    selected=set(); err=""; starred={}
+
+def filtered():
+    q = S.query.lower()
+    out = []
+    for r in S.repos:
+        if q and q not in r["name"].lower() and q not in (r.get("description") or "").lower(): continue
+        if S.ftype == "fork" and not r.get("fork"): continue
+        if S.ftype == "source" and r.get("fork"): continue
+        if S.ftype == "private" and r["visibility"] != "private": continue
+        if S.ftype == "public" and r["visibility"] != "public": continue
+        if S.flang:
+            has = (r.get("language") or "?").lower() == S.flang.lower()
+            if has != S.flang_mode: continue
+        out.append(r)
+    return out
+
+def page_items():
+    return filtered()[S.page*ROWS:(S.page+1)*ROWS]
+
+def fmt_time(iso):
+    try:
+        dt = datetime.datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+        d = (datetime.datetime.now(datetime.timezone.utc) - dt).days
+        return "hari ini" if d == 0 else "kemarin" if d == 1 else f"{d}h" if d < 30 else f"{d//30}bln" if d < 365 else f"{d//365}thn"
+    except Exception: return "-"
+
+def badge(r):
+    if r.get("fork"): return "[cyan]FORK[/]"
+    if r["visibility"] == "private": return "[yellow]PRIV[/]"
+    return "[green]PUB[/]"
+
+def render():
+    # expand=True + ratio=1 + no_wrap + ellipsis = deskripsi SELALU 1 baris
+    t = Table(box=None, show_header=False, show_edge=False, expand=True, padding=(0, 1))
+    t.add_column(width=2, no_wrap=True)                   # kursor
+    t.add_column(width=4, no_wrap=True, justify="right")   # nomor
+    t.add_column(no_wrap=True); t.add_column(no_wrap=True) # badge, nama
+    t.add_column(ratio=1, no_wrap=True, overflow="ellipsis")  # deskripsi flex
+    for w in (9, 11): t.add_column(no_wrap=True)           # push, *+bahasa
+    items = page_items()
+    for i, r in enumerate(items):
+        cur = ">" if i == S.cursor else " "
+        num = str(S.page*ROWS + i + 1)
+        name = r["name"]
+        if r["name"] in S.selected: name = f"[bold]{name}[/]"
+        star = "*" if S.starred.get(r["name"]) else " "
+        t.add_row(cur, f"[dim]{num}[/]", badge(r), name,
+                  (r.get("description") or "").strip(),
+                  fmt_time(r.get("pushed_at")),
+                  f"{star}{r.get('language') or '-'}")
+    return t, items
+
+def status():
+    n = len(filtered()); tot = len(S.repos)
+    line = f" {n}/{tot} repo | hal {S.page+1}"
+    if S.query: line += f" | cari:'{S.query}'"
+    if S.ftype != "all": line += f" | tipe:{S.ftype}"
+    if S.flang: line += f" | lang:{'' if S.flang_mode else '!'}{S.flang}"
+    if S.selected: line += f" | terpilih:{len(S.selected)}"
+    st = sum(r.get("stargazers_count", 0) for r in S.repos)
+    iss = sum(r.get("open_issues_count", 0) for r in S.repos)
+    line += f" | stars {st} | issues {iss}"
+    return line
+
+def read_key():
+    import termios, tty
+    fd = sys.stdin.fileno(); old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == '\x1b':
+            ch2 = sys.stdin.read(1)
+            if ch2 == '[':
+                return {'A':'up','B':'down','C':'right','D':'left'}.get(sys.stdin.read(1), 'esc')
+            return 'esc'
+        return {'\r':'enter','\n':'enter','\x7f':'bs','\t':'tab'}.get(ch, ch)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+def is_starred(name):
+    if name not in S.starred:
+        r = subprocess.run(["gh","api",f"/user/starred/{S.me}/{name}"], capture_output=True)
+        S.starred[name] = r.returncode == 0
+    return S.starred[name]
+
+def toggle_star(name):
+    verb = "DELETE" if is_starred(name) else "PUT"
+    gh("api", "-X", verb, f"/user/starred/{S.me}/{name}")
+    S.starred[name] = verb == "PUT"
+
+def cycle_lang():
+    langs = [l for l,_ in Counter((r.get("language") or "?") for r in S.repos).most_common()]
+    if not S.flang: S.flang = langs[0]
+    else:
+        i = langs.index(S.flang) if S.flang in langs else 0
+        if i + 1 < len(langs): S.flang = langs[i+1]
+        else: S.flang, S.flang_mode = "", True
+    S.page = S.cursor = 0
+
+def prompt(text):
+    console.print(f"\n[bold cyan]{text}[/]", end="")
+    return input().strip()
+
+def preview(r):
+    try: out = gh("repo", "view", f"{S.me}/{r['name']}")
+    except Exception as e: S.err = str(e); return
+    console.clear()
+    console.print(Panel(out, title=r["name"], border_style="cyan"))
+    console.print("[dim]enter kembali[/]")
+    read_key()
+
+def main():
+    S.me = json.loads(gh("api", "/user"))["login"]
+    S.repos = load_repos(force="--no-cache" in sys.argv)
+    while True:
+        console.clear()
+        body, items = render()
+        console.print(Panel(body, title=f"qg | {S.me} | R=refresh", border_style="cyan"))
+        console.print(f"[dim]{status()}[/]")
+        console.print("[dim]↑↓ nav  ←→ hal  enter lihat  / cari  f tipe  L bahasa  s star  TAB pilih  S star-sel[/]")
+        console.print("[dim]c clone  o buka  R refresh  q keluar[/]")
+        if S.err: console.print(f"[red]ERR: {S.err}[/]"); S.err = ""
+        key = read_key()
+        if key in ('q','esc','\x03'): break
+        elif key == 'up': S.cursor = max(0, S.cursor-1)
+        elif key == 'down': S.cursor = min(len(items)-1, S.cursor+1)
+        elif key == 'right': S.page += 1; S.cursor = 0
+        elif key == 'left': S.page = max(0, S.page-1); S.cursor = 0
+        elif key == '/': S.query = prompt("cari:"); S.page = S.cursor = 0
+        elif key == 'bs': S.query = ""; S.page = S.cursor = 0
+        elif key == 'f':
+            S.ftype = TYPES[(TYPES.index(S.ftype)+1) % len(TYPES)]; S.page = S.cursor = 0
+        elif key == 'L': cycle_lang()
+        elif key == '!' and S.flang: S.flang_mode = not S.flang_mode
+        elif key == 's' and items: toggle_star(items[S.cursor]["name"])
+        elif key == 'tab' and items:
+            n = items[S.cursor]["name"]
+            (S.selected.discard if n in S.selected else S.selected.add)(n)
+        elif key == 'S':
+            for n in list(S.selected):
+                try: toggle_star(n)
+                except Exception as e: S.err = f"{n}: {e}"
+            S.selected.clear()
+        elif key == 'c' and items:
+            name = items[S.cursor]["name"]
+            try: subprocess.run(["gh","repo","clone",f"{S.me}/{name}"], check=False)
+            except Exception as e: S.err = str(e)
+        elif key == 'o' and items:
+            subprocess.run(["xdg-open", f"https://github.com/{S.me}/{items[S.cursor]['name']}"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif key == 'R':
+            try: S.repos = load_repos(force=True)
+            except Exception as e: S.err = str(e)
+            S.page = S.cursor = 0
+        elif key == 'enter' and items: preview(items[S.cursor])
+
+if __name__ == "__main__":
+    try: main()
+    except KeyboardInterrupt: pass
